@@ -1,0 +1,14 @@
+Multiple other views depend on weather_hourly_aggs, which means all of those views will have to be dropped before updating to include VPD.
+
+The weather_hourly_aggs statement is already modified to include VPD.
+
+Order of operations:
+- DROP CASCADE
+- Recreate hourly with VPD
+- Recreate forecast accuracy views
+    - forecast_accuracy
+    - forecast_accuracy_monthly
+    - precip_accuracy
+    - precip_accuracy_summary
+    - precip_surprise
+

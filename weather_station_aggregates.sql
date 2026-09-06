@@ -214,3 +214,4 @@ CALL timescaledb_experimental.refresh_continuous_aggregate_with_no_max_invalidat
 );
 
 CALL refresh_continuous_aggregate('weather_yearly_aggs', NULL, NULL);
+CALL refresh_continuous_aggregate('hourly_yearly_aggs', NULL, NULL);

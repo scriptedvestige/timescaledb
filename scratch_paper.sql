@@ -62,5 +62,3 @@ ORDER BY "Day" DESC;
 
 
 select period_start, vpd_avg from weather_hourly_aggs order by period_start asc; 
-
-

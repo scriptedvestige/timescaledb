@@ -14,3 +14,5 @@ SELECT add_continuous_aggregate_policy('rain_totals_monthly',
   start_offset => INTERVAL '3 months',
   end_offset => INTERVAL '1 day',
   schedule_interval => INTERVAL '1 day');
+
+CALL refresh_continuous_aggregate('rain_totals_monthly', NULL, NULL);

@@ -1,10 +1,10 @@
--- Daily tracking
+-- 1. Daily stats (local days, live current day)
 CREATE MATERIALIZED VIEW vpd_daily_stats
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
-    time_bucket('1 day', time) AS day,
+    time_bucket('1 day', time, 'America/Los_Angeles') AS day,
     -- Hours in ideal range (each 5-min interval = 1/12 hour)
-    COUNT(*) FILTER (WHERE vpd >= 0.4 AND vpd <= 1.2) / 12.0 AS hours_in_range,
+    COUNT(*) FILTER (WHERE vpd >= 0.4 AND vpd <= 1.6) / 12.0 AS hours_in_range,
     -- Total observations for coverage check
     COUNT(*) AS total_obs,
     -- Min/max for context
@@ -13,92 +13,89 @@ SELECT
     AVG(vpd) AS vpd_avg
 FROM ws_observations
 WHERE vpd IS NOT NULL
-GROUP BY time_bucket('1 day', time)
+GROUP BY day
 WITH NO DATA;
 
--- Set policy to refresh
+-- Policy: runs daily at 00:16 local
 SELECT add_continuous_aggregate_policy('vpd_daily_stats',
-    start_offset => INTERVAL '3 days',
-    end_offset   => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 hour');
+    start_offset      => INTERVAL '3 days',
+    end_offset        => INTERVAL '0 minutes',
+    schedule_interval => INTERVAL '1 day',
+    initial_start     => '2026-10-26 00:16:00-07'::timestamptz,
+    timezone          => 'America/Los_Angeles');
 
--- Backfill data from date VPD was added to table
-CALL refresh_continuous_aggregate('vpd_daily_stats', '2026-04-10', NULL);
-
--- See the data
-SELECT 
-    day::date,
-    ROUND(hours_in_range::numeric, 2) AS hours_in_range,
-    total_obs,
-    vpd_min,
-    vpd_max,
-    ROUND(vpd_avg::numeric, 2) AS vpd_avg
-FROM vpd_daily_stats
-ORDER BY day;
+-- Backfill (run by itself)
+CALL refresh_continuous_aggregate('vpd_daily_stats', NULL, NULL);
 
 
--- Gaps and Islands View
-CREATE VIEW vpd_daily_longest_window AS
-WITH flagged AS (
-    SELECT
-        time,
-        DATE_TRUNC('day', time) AS day,
-        CASE WHEN vpd >= 0.4 AND vpd <= 1.2 THEN 1 ELSE 0 END AS in_range
+-- VPD Episodes
+CREATE VIEW vpd_episodes AS
+WITH base AS (
+    SELECT time,
+           (vpd >= 0.4 AND vpd <= 1.6) AS in_range,
+           lag(time) OVER w AS prev_time,
+           lag(vpd >= 0.4 AND vpd <= 1.6) OVER w AS prev_in
     FROM ws_observations
     WHERE vpd IS NOT NULL
+    WINDOW w AS (ORDER BY time)
 ),
-islands AS (
-    SELECT
-        day,
-        in_range,
-        time,
-        ROW_NUMBER() OVER (PARTITION BY day ORDER BY time) -
-        ROW_NUMBER() OVER (PARTITION BY day, in_range ORDER BY time) AS grp
-    FROM flagged
+marked AS (
+    SELECT *,
+           CASE WHEN prev_time IS NULL
+                  OR time - prev_time > INTERVAL '15 minutes'
+                  OR in_range IS DISTINCT FROM prev_in
+                THEN 1 ELSE 0 END AS new_run
+    FROM base
 ),
-island_lengths AS (
-    SELECT
-        day,
-        in_range,
-        grp,
-        COUNT(*) / 12.0 AS window_hours
-    FROM islands
-    GROUP BY day, in_range, grp
+runs AS (
+    SELECT *, SUM(new_run) OVER (ORDER BY time) AS run_id
+    FROM marked
 )
-SELECT
-    day,
-    COALESCE(MAX(window_hours) FILTER (WHERE in_range = 1), 0) AS longest_window_hours
-FROM island_lengths
-GROUP BY day;
-
--- See the data
-SELECT 
-    day::date,
-    ROUND(longest_window_hours::numeric, 2) AS longest_window_hours
-FROM vpd_daily_longest_window
-ORDER BY day;
-
--- Compare longest stretch to total hours per day in ideal VPD range
-SELECT
-    s.day::date AS "Date",
-    ROUND(s.hours_in_range::numeric, 2) AS "Hours In Range",
-    ROUND(w.longest_window_hours::numeric, 2) AS "Longest Window",
-    ROUND(s.vpd_min::numeric, 2) AS "VPD Min",
-    ROUND(s.vpd_avg::numeric, 2) AS "VPD Avg",
-    ROUND(s.vpd_max::numeric, 2) AS "VPD Max"
-FROM vpd_daily_stats s
-JOIN vpd_daily_longest_window w ON w.day = s.day
-ORDER BY s.day desc;
+SELECT run_id,
+       MIN(time) AS entered_at,
+       MAX(time) + INTERVAL '5 minutes' AS exited_at,
+       ROUND(EXTRACT(EPOCH FROM (MAX(time) - MIN(time) + INTERVAL '5 minutes')) / 3600.0, 2) AS duration_hours,
+       (MIN(time) AT TIME ZONE 'America/Los_Angeles')::date AS start_day,
+       (MIN(time) AT TIME ZONE 'America/Los_Angeles')::time AS entered_local,
+       (MAX(time) AT TIME ZONE 'America/Los_Angeles')::time AS exited_local
+FROM runs
+WHERE in_range
+GROUP BY run_id;
 
 
--- Monthly Total Days With Ideal VPD
+-- 3. Monthly (local months)
 CREATE VIEW vpd_monthly_stats AS
 SELECT
-    DATE_TRUNC('month', day) AS month,
+    time_bucket('1 month', day, 'America/Los_Angeles') AS month,
     COUNT(*) FILTER (WHERE hours_in_range > 0) AS days_hitting_range,
     COUNT(*) AS total_days,
     ROUND(AVG(hours_in_range)::numeric, 2) AS avg_hours_in_range,
     ROUND(MAX(hours_in_range)::numeric, 2) AS best_day_hours
 FROM vpd_daily_stats
-GROUP BY DATE_TRUNC('month', day)
-ORDER BY month;
+GROUP BY 1
+ORDER BY 1;
+
+
+-- Troubleshooting
+CALL refresh_continuous_aggregate('vpd_daily_stats', NULL, NULL);
+
+
+DROP VIEW vpd_monthly_stats;
+DROP MATERIALIZED VIEW vpd_daily_stats;
+
+
+
+
+
+SELECT
+    s.day::date AS "Date",
+    ROUND(s.hours_in_range::numeric, 2) AS "Hours In Range",
+    ROUND(COALESCE(MAX(e.duration_hours), 0)::numeric, 2) AS "Longest Episode",
+    ROUND(s.vpd_min::numeric, 2) AS "VPD Min",
+    ROUND(s.vpd_avg::numeric, 2) AS "VPD Avg",
+    ROUND(s.vpd_max::numeric, 2) AS "VPD Max"
+FROM vpd_daily_stats s
+LEFT JOIN vpd_episodes e
+  ON e.start_day = (s.day AT TIME ZONE 'America/Los_Angeles')::date
+GROUP BY s.day, s.hours_in_range, s.vpd_min, s.vpd_avg, s.vpd_max
+ORDER BY s.day DESC;

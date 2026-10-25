@@ -49,8 +49,8 @@ WITH NO DATA;
 SELECT add_continuous_aggregate_policy('console_daily_aggs',
     start_offset      => INTERVAL '3 days',
     end_offset        => INTERVAL '0 minutes',
-    schedule_interval => INTERVAL '1 day',
-    initial_start     => '2026-10-26 00:05:00-07'::timestamptz,
+    schedule_interval => INTERVAL '1 hour',
+    initial_start     => '2026-10-25 17:05:00-07'::timestamptz,
     timezone          => 'America/Los_Angeles');
 
 
